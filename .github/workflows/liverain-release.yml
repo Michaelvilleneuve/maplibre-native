@@ -1,0 +1,129 @@
+# LiveRain's build of MapLibre Native (branch liverain-terrain: feature/terrain-3d
+# plus LiveRain's patches). A tag liverain-terrain-<N> builds:
+# - iOS: the Metal XCFramework (MapLibre.dynamic.xcframework.zip), attached to the
+#   tag's release; liverain-ios' Packages/MapLibre takes its URL and checksum;
+# - Android: the OpenGL AAR, published as org.maplibre.gl:android-sdk-opengl:
+#   <platform/android/VERSION>-<tag> to the `maven` branch, a Maven repository served
+#   at https://raw.githubusercontent.com/<this repo>/maven (liverain-android's
+#   settings.gradle.kts).
+# Upstream's workflows are left out of this branch.
+name: liverain-release
+
+on:
+  push:
+    tags: ["liverain-*"]
+
+permissions:
+  contents: write
+
+jobs:
+  ios:
+    runs-on: macos-26
+    timeout-minutes: 300
+    defaults:
+      run:
+        working-directory: platform/ios
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Set up Bazel
+        uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
+
+      - name: Build the XCFramework
+        run: |
+          bazel build --compilation_mode=opt --//:renderer=metal \
+            --features=dead_strip,thin_lto --objc_enable_binary_stripping --apple_generate_dsym \
+            //platform/ios:MapLibre.dynamic --embed_label=maplibre_ios_"$(cat VERSION)"
+          cp "$(bazel info --compilation_mode=opt bazel-bin)/platform/ios/MapLibre.dynamic.xcframework.zip" "$GITHUB_WORKSPACE/"
+          chmod +w "$GITHUB_WORKSPACE/MapLibre.dynamic.xcframework.zip"
+          (cd "$GITHUB_WORKSPACE" && zip MapLibre.dynamic.xcframework.zip LICENSE.md)
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: xcframework
+          path: MapLibre.dynamic.xcframework.zip
+
+  android:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 300
+    defaults:
+      run:
+        working-directory: platform/android
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: ".nvmrc"
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: npm install
+        run: npm install --ignore-scripts
+
+      - name: Build and publish the AAR to a local Maven repository
+        run: |
+          echo "$(cat VERSION)-$GITHUB_REF_NAME" > VERSION
+          ./gradlew --no-daemon :MapLibreAndroid:publishOpenglReleasePublicationToConfiguredRepository \
+            -PpublicationRepositoryUrl="file://$RUNNER_TEMP/maven"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: maven
+          path: ${{ runner.temp }}/maven
+
+  release:
+    needs: [ios, android]
+    runs-on: ubuntu-26.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+
+      - name: Release with the XCFramework
+        run: |
+          zip=artifacts/xcframework/MapLibre.dynamic.xcframework.zip
+          checksum=$(sha256sum "$zip" | cut -d' ' -f1)
+          aar=$(find artifacts/maven -name '*.aar' | head -1)
+          version=$(basename "$(dirname "$aar")")
+          cat > notes.md <<NOTES
+          LiveRain's MapLibre Native: \`${GITHUB_SHA}\` (branch liverain-terrain).
+
+          iOS (Swift package binary target):
+          - url: https://github.com/${GH_REPO}/releases/download/${GITHUB_REF_NAME}/MapLibre.dynamic.xcframework.zip
+          - checksum: ${checksum}
+
+          Android: \`org.maplibre.gl:android-sdk-opengl:${version}\` from the Maven repository https://raw.githubusercontent.com/${GH_REPO}/maven
+          NOTES
+          gh release create "$GITHUB_REF_NAME" "$zip" --title "$GITHUB_REF_NAME" --notes-file notes.md
+
+      - name: Add the AAR to the maven branch
+        run: |
+          mkdir branch && cd branch
+          git init -q
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git"
+          if git fetch -q --depth 1 origin maven; then git checkout -q -b maven FETCH_HEAD; else git checkout -q --orphan maven; fi
+          cp -r ../artifacts/maven/. .
+          git add -A
+          git commit -q -m "android-sdk-opengl from ${GITHUB_REF_NAME} (${GITHUB_SHA})"
+          git push -q origin maven
