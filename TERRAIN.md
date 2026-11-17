@@ -1885,6 +1885,23 @@ mesh's remap, z' = (z + w) / 2, itself. `CustomLayerRenderParameters` carries th
 exaggeration (0 with terrain off), and on Metal the packed depth texture `RenderTerrain::renderDepth`
 draws before the main pass (null until it has drawn); iOS hands them over as
 `MLNStyleLayerDrawingContext.terrainExaggeration` and `MLNCustomStyleLayer.terrainDepthTexture`.
+On OpenGL the same depth texture is handed over as a GL texture name,
+`CustomLayerRenderParameters::terrainDepthTexture` (0 with terrain off or before the pass has drawn
+at the framebuffer's size): read at `gl_FragCoord.xy`, `depth = dot(texel * 255, (1/256, 1/65536,
+1/2^24, 1/2^32))`, clip z = 2 depth - 1, 1 (white) where no ground is drawn.
+
+That lets a custom layer draw *onto* the terrain without being draped: one triangle over the screen,
+each pixel's depth unprojected through the inverse of `projectionMatrix` into its place on the
+ground, the layer's colour computed there. One pass at the screen's resolution, exact on the relief,
+whatever the layer's shader costs - draping it would run that shader over every drape target (tens of
+512-1024 px targets) and again whenever its content changes, which for an animated layer is every
+frame. The depth pass is only redrawn when the camera or the mesh tiles change. For precision far
+away, read the depth as its complement `c = 1 - depth` from `255 - k` (the digits of a far depth are
+all 9s) and unproject `inv * (x, y, 1, 1) - 2 c * inv[2]`, with the inverse computed in double and
+the map's centre taken off its x and y rows. `test/api/custom_layer_terrain.test.cpp` checks it on
+ground 2000 m high under a pitched, rotated camera. Such a layer draws over the draped layers
+(after the mesh), so a style's draped layers above it (borders, labels' halos drawn as lines) end up
+under it.
 
 ## References
 
