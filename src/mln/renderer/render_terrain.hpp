@@ -1,6 +1,7 @@
 #pragma once
 
 #include <mln/map/mode.hpp>
+#include <mln/util/image.hpp>
 #include <mln/style/terrain_impl.hpp>
 #include <mln/util/immutable.hpp>
 #include <mln/tile/tile_id.hpp>
@@ -579,6 +580,9 @@ private:
         // fill-extrusion) bound this texture through getTerrainData. Mutable because that
         // lookup is const and runs after update(), in the frame's draw.
         mutable uint64_t sampledAt = 0;
+        // The DEM image, so that a tile serving as an ancestor from this cache after its own
+        // load (no DEMData that frame) can still be packed into the GL depth pass's array
+        std::shared_ptr<PremultipliedImage> image;
     };
     std::map<UnwrappedTileID, DEMTextureEntry> demTextures;
     // Retention cap for demTextures (~1MB per 514x514 DEM texture); entries not
@@ -608,7 +612,14 @@ private:
     std::map<UnwrappedTileID, uint32_t> demArrayLayer; // tile -> array layer index
     std::vector<uint32_t> demArrayFreeLayers;          // recycled layer slots
     uint32_t demArrayNextLayer = 0;                    // next never-used slot
+    // The tiles whose array layer a mesh tile used this frame and the one before: the layers
+    // of the others are taken back when the array is full, rather than the new tile being
+    // left out of the depth pass (no ground under it for the depth's readers: occlusion, custom
+    // layers drawing onto the terrain)
+    std::set<UnwrappedTileID> demArrayUsed;
+    std::set<UnwrappedTileID> demArrayUsedBefore;
     void packDEMArrayLayer(gfx::Context&, const UnwrappedTileID&, const DEMData&);
+    void packDEMArrayLayer(gfx::Context&, const UnwrappedTileID&, const PremultipliedImage&);
     void freeDEMArrayLayer(const UnwrappedTileID&);
 
     // Instanced depth pass: one draw covers every mesh tile, sampling each tile's DEM from

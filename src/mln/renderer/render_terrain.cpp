@@ -605,6 +605,8 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // holds such tiles.
     ++demUpdateCounter;
 #if MLN_RENDER_BACKEND_OPENGL
+    demArrayUsedBefore = std::move(demArrayUsed);
+    demArrayUsed.clear();
     // This frame's DEM data by tile, for packing a tile into the GL array once a mesh tile binds it
     std::unordered_map<UnwrappedTileID, const DEMData*> frameDEMData;
 #endif
@@ -629,6 +631,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 if (existing->second.borderRevision != demData->getBorderRevision()) {
                     existing->second.borderRevision = demData->getBorderRevision();
                     existing->second.texture->setImage(demData->getImagePtr());
+                    existing->second.image = demData->getImagePtr();
 #if MLN_RENDER_BACKEND_OPENGL
                     // OpenGL uploads at once; Metal does it when the texture is next bound
                     existing->second.texture->upload();
@@ -647,7 +650,8 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                     demTextures[loaded.id] = {.texture = texture,
                                               .dim = demData->dim,
                                               .lastUsed = demUpdateCounter,
-                                              .borderRevision = demData->getBorderRevision()};
+                                              .borderRevision = demData->getBorderRevision(),
+                                              .image = demData->getImagePtr()};
                 }
             }
         }
@@ -836,9 +840,14 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 // binds it: packing every loaded DEM tile let the retained ancestors fill the 64
                 // layers, and mesh tiles left without one drop out of the depth pass (no occlusion
                 // over them). A texture is bound the frame it is made, while its DEM is loaded.
+                demArrayUsed.insert(*demTileUsed);
                 if (!demArrayLayer.contains(*demTileUsed)) {
                     if (const auto data = frameDEMData.find(*demTileUsed); data != frameDEMData.end()) {
                         packDEMArrayLayer(context, *demTileUsed, *data->second);
+                    } else if (const auto entry = demTextures.find(*demTileUsed);
+                               entry != demTextures.end() && entry->second.image) {
+                        // an ancestor from the cache, loaded on an earlier frame
+                        packDEMArrayLayer(context, *demTileUsed, *entry->second.image);
                     }
                 }
                 if (const auto la = demArrayLayer.find(*demTileUsed); la != demArrayLayer.end()) {
@@ -1657,8 +1666,14 @@ void RenderTerrain::deactivate(UniqueChangeRequestVec& changes) {
 
 #if MLN_RENDER_BACKEND_OPENGL
 void RenderTerrain::packDEMArrayLayer(gfx::Context& context, const UnwrappedTileID& id, const DEMData& demData) {
-    const auto& imagePtr = demData.getImagePtr();
-    if (!imagePtr || imagePtr->size.isEmpty()) {
+    if (const auto& imagePtr = demData.getImagePtr()) {
+        packDEMArrayLayer(context, id, *imagePtr);
+    }
+}
+
+void RenderTerrain::packDEMArrayLayer(gfx::Context& context, const UnwrappedTileID& id, const PremultipliedImage& image) {
+    const auto* imagePtr = &image;
+    if (imagePtr->size.isEmpty()) {
         return;
     }
     if (!demTextureArray) {
@@ -1681,7 +1696,18 @@ void RenderTerrain::packDEMArrayLayer(gfx::Context& context, const UnwrappedTile
         layer = demArrayNextLayer++;
         demArrayLayer[id] = layer;
     } else {
-        return; // array full - tile keeps its per-tile texture, just not instanced
+        // Full: take back the layer of a tile no mesh tile used this frame nor the one before
+        // (an ancestor kept in the cache, a tile left behind), rather than leave this one out of
+        // the depth pass. The others' layers stay as they are.
+        const auto spare = std::find_if(demArrayLayer.begin(), demArrayLayer.end(), [&](const auto& entry) {
+            return !demArrayUsed.contains(entry.first) && !demArrayUsedBefore.contains(entry.first);
+        });
+        if (spare == demArrayLayer.end()) {
+            return; // every layer in use - tile keeps its per-tile texture, just not instanced
+        }
+        layer = spare->second;
+        demArrayLayer.erase(spare);
+        demArrayLayer[id] = layer;
     }
     demTextureArray->uploadLayer(layer, imagePtr->data.get());
 }
