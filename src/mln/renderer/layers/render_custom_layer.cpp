@@ -113,6 +113,8 @@ void RenderCustomLayer::update([[maybe_unused]] gfx::ShaderRegistry& shaders,
     if (!layerGroup) {
         // Drawn on screen after the terrain mesh, never into the drape (TERRAIN.md, "Custom layers")
         if (auto layerGroup_ = context.createLayerGroup(layerIndex, /*initialCapacity=*/1, getID(), false)) {
+            // The draped layers above it go into another drape stack, drawn over it
+            layerGroup_->setBreaksDrapeStack(true);
             setLayerGroup(std::move(layerGroup_), changes);
         }
     }

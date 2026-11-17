@@ -53,6 +53,15 @@ public:
     void setDrapeTileID(const UnwrappedTileID& id);
     const std::optional<UnwrappedTileID>& getDrapeTileID() const { return drapeTileID; }
 
+    /// The drape stack this target bakes (0: the draped layers under every custom layer, cleared
+    /// to the background; above: transparent, the terrain drawn again with it over the custom layers)
+    uint8_t getDrapeStack() const { return drapeStack; }
+    void setDrapeStack(uint8_t stack) { drapeStack = stack; }
+
+    /// A stack-0 drape target's targets for the stacks above, same tile and size (TexturePool)
+    std::vector<std::shared_ptr<RenderTarget>>& getStackTargets() { return stackTargets; }
+    const std::vector<std::shared_ptr<RenderTarget>>& getStackTargets() const { return stackTargets; }
+
     /// Refresh this drape target's copy of the global paint parameters,
     /// carrying the target tile in `drape_tile` (no-op for non-drape targets)
     void updateDrapeGlobalUBO(const shaders::GlobalPaintParamsUBO& params, gfx::Context& context);
@@ -177,6 +186,8 @@ protected:
     LayerGroupMap layerGroupsByLayerIndex;
     Color backgroundColor;
     std::optional<UnwrappedTileID> drapeTileID;
+    uint8_t drapeStack = 0;
+    std::vector<std::shared_ptr<RenderTarget>> stackTargets;
     // (z, x including wrap, y, 1) of the drape tile, as consumed by
     // apply_drape_transform; w = 1 marks an active drape target
     std::array<float, 4> drapeTileValues{{0, 0, 0, 0}};

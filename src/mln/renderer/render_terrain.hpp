@@ -474,6 +474,22 @@ public:
      */
     TerrainLayerTweaker* getTweaker() const { return tweaker.get(); }
 
+    /// The drape stacks above the first, by the lowest layer index of each one's draped groups
+    /// (Renderer::Impl, each frame): the terrain is drawn again for each, at that index, with its
+    /// drape targets, over the custom layers under it
+    void setDrapeStacks(std::vector<int32_t> upperStackIndices) { pendingDrapeStacks = std::move(upperStackIndices); }
+
+    /// The terrain's layer group of each drape stack above the first, with its own tweaker (its
+    /// drawables are not in the same order as the first's, which a shared tweaker's buffer needs)
+    template <typename Func /* void(LayerGroupBase&, TerrainLayerTweaker&) */>
+    void visitStackGroups(Func f) {
+        for (auto& stackGroup : stackGroups) {
+            if (stackGroup.group && stackGroup.tweaker) {
+                f(*stackGroup.group, *stackGroup.tweaker);
+            }
+        }
+    }
+
     // Immutable terrain configuration
     Immutable<style::Terrain::Impl> impl;
 
@@ -520,6 +536,21 @@ private:
 
     // Terrain layer tweaker for UBO updates
     std::unique_ptr<TerrainLayerTweaker> tweaker;
+
+    // The terrain drawn again for each drape stack above the first (setDrapeStacks): its group at
+    // the stack's layer index, a drawable a mesh tile sampling that stack's drape target, blended
+    // over what is under it at the depth the first stack's terrain wrote
+    struct StackGroup {
+        int32_t layerIndex = 0;
+        LayerGroupBasePtr group;
+        std::unique_ptr<TerrainLayerTweaker> tweaker;
+    };
+    std::vector<StackGroup> stackGroups;
+    std::vector<int32_t> pendingDrapeStacks;
+    // The stack groups made again when the stacks change; true when they were (every tile's
+    // drawables are then made again)
+    bool syncStackGroups(gfx::Context&, UniqueChangeRequestVec&);
+    void clearStackGroupDrawables();
 
     // Mesh drawables by tile, with the DEM they were built on (tier: 0 = placeholder/flat,
     // 1 = ancestor fallback, 2 = own DEM, plus that DEM's zoom); a drawable is replaced
@@ -618,6 +649,9 @@ private:
     // layers drawing onto the terrain)
     std::set<UnwrappedTileID> demArrayUsed;
     std::set<UnwrappedTileID> demArrayUsedBefore;
+    // The DEM tile whose array layer each mesh tile's drawable reads (marked used every frame, a
+    // drawable kept as it is too)
+    std::unordered_map<OverscaledTileID, UnwrappedTileID> drawableDemTile;
     void packDEMArrayLayer(gfx::Context&, const UnwrappedTileID&, const DEMData&);
     void packDEMArrayLayer(gfx::Context&, const UnwrappedTileID&, const PremultipliedImage&);
     void freeDEMArrayLayer(const UnwrappedTileID&);
@@ -668,7 +702,8 @@ private:
                                                          const OverscaledTileID& tileID,
                                                          std::shared_ptr<gfx::Texture2D> demTexture,
                                                          std::shared_ptr<gfx::Texture2D> mapTexture,
-                                                         bool depthPass = false);
+                                                         bool depthPass = false,
+                                                         bool stackOverlay = false);
 };
 
 } // namespace mln

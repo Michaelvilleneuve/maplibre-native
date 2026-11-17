@@ -113,6 +113,16 @@ public:
 
     bool shouldRenderToTerrain() const { return renderToTerrain; }
 
+    /// Drawn on screen after the terrain (a custom layer): the draped layers above it in the style go
+    /// into another drape stack, drawn over it (maplibre-gl-js render_to_texture's stacks)
+    bool breaksDrapeStack() const { return drapeStackBreak; }
+    void setBreaksDrapeStack(bool value) { drapeStackBreak = value; }
+
+    /// The drape stack of a draped group: 0 under every stack break, then one per break with draped
+    /// groups above it (Renderer::Impl::assignDrapeStacks, each frame)
+    uint8_t getDrapeStack() const { return drapeStack; }
+    void setDrapeStack(uint8_t value) { drapeStack = value; }
+
     /// Set observer
     void setObserver(gfx::ContextObserver*);
 
@@ -123,6 +133,8 @@ protected:
     std::vector<LayerTweakerWeakPtr> layerTweakers;
     std::string name;
     bool renderToTerrain;
+    bool drapeStackBreak = false;
+    uint8_t drapeStack = 0;
     gfx::ContextObserver* observer;
 };
 

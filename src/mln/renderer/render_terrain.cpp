@@ -543,6 +543,19 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         tweaker = std::make_unique<TerrainLayerTweaker>(this);
     }
 
+    // The terrain's groups of the drape stacks above the first; made again, every tile's drawables
+    // with them, when the stacks change (a custom layer added or moved: rare)
+    if (syncStackGroups(context, changes)) {
+        if (layerGroup) {
+            layerGroup->clearDrawables();
+        }
+        if (depthLayerGroup) {
+            depthLayerGroup->clearDrawables();
+            depthDirty = true;
+        }
+        tilesWithDrawables.clear();
+    }
+
     // The skirts are baked into the shared mesh, so a change of setting has to drop the mesh
     // and every tile drawable holding a buffer built from it.
     if (updateParameters && updateParameters->terrainSkirtLength != meshSkirtLength) {
@@ -555,6 +568,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             depthLayerGroup->clearDrawables();
             depthDirty = true;
         }
+        clearStackGroupDrawables();
         tilesWithDrawables.clear();
     }
 
@@ -665,6 +679,11 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     }
     lg->removeDrawablesIf(
         [&](gfx::Drawable& drawable) { return drawable.getTileID() && !currentTiles.contains(*drawable.getTileID()); });
+    for (auto& stackGroup : stackGroups) {
+        static_cast<LayerGroup&>(*stackGroup.group).removeDrawablesIf([&](gfx::Drawable& drawable) {
+            return drawable.getTileID() && !currentTiles.contains(*drawable.getTileID());
+        });
+    }
     auto* depthLg = static_cast<LayerGroup*>(depthLayerGroup.get());
     if (depthLg) {
         if (depthLg->removeDrawablesIf([&](gfx::Drawable& drawable) {
@@ -680,6 +699,7 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
         if (lg->getDrawableCount() != depthLg->getDrawableCount()) {
             lg->clearDrawables();
             depthLg->clearDrawables();
+            clearStackGroupDrawables();
             depthDirty = true;
             tilesWithDrawables.clear();
         }
@@ -688,6 +708,9 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     for (auto it = tilesWithDrawables.begin(); it != tilesWithDrawables.end();) {
         if (!currentTiles.contains(it->first)) {
             drawableDemCoords.erase(it->first);
+#if MLN_RENDER_BACKEND_OPENGL
+            drawableDemTile.erase(it->first);
+#endif
             it = tilesWithDrawables.erase(it);
         } else {
             ++it;
@@ -822,6 +845,11 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             }
             lg->removeDrawablesIf(
                 [&](gfx::Drawable& drawable) { return drawable.getTileID() && *drawable.getTileID() == tileID; });
+            for (auto& stackGroup : stackGroups) {
+                static_cast<LayerGroup&>(*stackGroup.group).removeDrawablesIf([&](gfx::Drawable& drawable) {
+                    return drawable.getTileID() && *drawable.getTileID() == tileID;
+                });
+            }
             // The depth drawable ignores the drape but is remade with the terrain drawable, to keep the
             // two groups in the same order (see TerrainLayerTweaker::drawableUniformBuffer).
             if (depthLg) {
@@ -840,6 +868,8 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
                 // binds it: packing every loaded DEM tile let the retained ancestors fill the 64
                 // layers, and mesh tiles left without one drop out of the depth pass (no occlusion
                 // over them). A texture is bound the frame it is made, while its DEM is loaded.
+                drawableDemTile.insert_or_assign(tileID, *demTileUsed);
+                // in use from now on: a tile bound later in this loop must not take its layer back
                 demArrayUsed.insert(*demTileUsed);
                 if (!demArrayLayer.contains(*demTileUsed)) {
                     if (const auto data = frameDEMData.find(*demTileUsed); data != frameDEMData.end()) {
@@ -868,6 +898,22 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             lg->addDrawable(std::move(drawable));
             binding.drapeTexture = renderTarget->getTexture();
             tilesWithDrawables[tileID] = binding;
+            // The same tile again for each drape stack above the first, over the custom layers under it
+            for (std::size_t k = 0; k < stackGroups.size(); ++k) {
+                const auto stackTarget = texturePool.getStackRenderTarget(unwrapped, static_cast<uint8_t>(k + 1));
+                if (!stackTarget) {
+                    continue;
+                }
+                if (auto stackDrawable = createDrawableForTile(context,
+                                                               shaders,
+                                                               tileID,
+                                                               demTexture,
+                                                               stackTarget->getTexture(),
+                                                               /*depthPass=*/false,
+                                                               /*stackOverlay=*/true)) {
+                    static_cast<LayerGroup&>(*stackGroups[k].group).addDrawable(std::move(stackDrawable));
+                }
+            }
 #if !MLN_RENDER_BACKEND_OPENGL
             // Non-GL backends: one depth drawable per tile (no instancing path there).
             if (depthLg) {
@@ -893,6 +939,14 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
     // transforms refresh every frame in updateInstancedDepthUBO). Tiles without a packed DEM
     // array layer (-1) are skipped - they briefly miss depth occlusion, the same tolerance the
     // old ancestor/placeholder fallback had.
+    // Every mesh tile's DEM layer is in use this frame, the drawables kept as they were too: only the
+    // others' may be taken back when the array is full (packDEMArrayLayer)
+    for (const auto& unwrapped : meshTiles) {
+        const OverscaledTileID tileID(unwrapped.canonical.z, unwrapped.wrap, unwrapped.canonical);
+        if (const auto used = drawableDemTile.find(tileID); used != drawableDemTile.end()) {
+            demArrayUsed.insert(used->second);
+        }
+    }
     {
         std::vector<DepthInstance> instances;
         instances.reserve(meshTiles.size());
@@ -911,6 +965,11 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             instances.push_back({tileID, coords, lc->second});
             util::hash_combine(sig, std::hash<OverscaledTileID>{}(tileID));
             util::hash_combine(sig, static_cast<int>(lc->second));
+            // the sub-rect of the DEM read too: a tile moving from an ancestor to its own DEM can land
+            // on the same (recycled) layer, and with the camera still the depth was never drawn again
+            for (const float c : coords) {
+                util::hash_combine(sig, std::hash<float>{}(c));
+            }
         }
         depthInstances = std::move(instances);
         if (sig != depthInstanceSignature) {
@@ -1538,7 +1597,8 @@ std::unique_ptr<gfx::Drawable> RenderTerrain::createDrawableForTile(gfx::Context
                                                                     const OverscaledTileID& tileID,
                                                                     std::shared_ptr<gfx::Texture2D> demTexture,
                                                                     std::shared_ptr<gfx::Texture2D> mapTexture,
-                                                                    bool depthPass) {
+                                                                    bool depthPass,
+                                                                    bool stackOverlay) {
     // Ensure mesh is generated
     const auto& terrainMesh = getMesh(context);
 
@@ -1576,6 +1636,16 @@ std::unique_ptr<gfx::Drawable> RenderTerrain::createDrawableForTile(gfx::Context
         // nearest surface wins, into the terrain depth target (renderDepth)
         builder->setDepthType(gfx::DepthMaskType::ReadWrite);
         builder->setColorMode(gfx::ColorMode::unblended());
+        builder->setEnableDepth(true);
+        builder->setIs3D(true);
+    } else if (stackOverlay) {
+        // A drape stack above the first: the same surface, drawn again later in the frame over the
+        // custom layers under the stack. It tests against the depth the first stack's surface wrote,
+        // the same geometry through the same shader and matrices (equal depth passes LessEqual),
+        // without writing it, and blends its drape - transparent where its layers draw nothing - over
+        // what is there.
+        builder->setDepthType(gfx::DepthMaskType::ReadOnly);
+        builder->setColorMode(gfx::ColorMode::alphaBlended());
         builder->setEnableDepth(true);
         builder->setIs3D(true);
     } else {
@@ -1657,11 +1727,55 @@ void RenderTerrain::activateLayerGroup(bool activate, UniqueChangeRequestVec& ch
     }
 }
 
+bool RenderTerrain::syncStackGroups(gfx::Context& context, UniqueChangeRequestVec& changes) {
+    const bool same = stackGroups.size() == pendingDrapeStacks.size() &&
+                      std::equal(stackGroups.begin(),
+                                 stackGroups.end(),
+                                 pendingDrapeStacks.begin(),
+                                 [](const StackGroup& group, int32_t index) { return group.layerIndex == index; });
+    if (same) {
+        return false;
+    }
+    for (auto& stackGroup : stackGroups) {
+        if (stackGroup.group) {
+            changes.emplace_back(std::make_unique<RemoveLayerGroupRequest>(stackGroup.group));
+        }
+    }
+    stackGroups.clear();
+    for (std::size_t k = 0; k < pendingDrapeStacks.size(); ++k) {
+        auto group = context.createLayerGroup(
+            pendingDrapeStacks[k], /*initialCapacity=*/1, "terrain-stack-" + std::to_string(k + 1), false);
+        if (!group) {
+            Log::Error(Event::Render, "Failed to create a terrain drape stack layer group");
+            break;
+        }
+        changes.emplace_back(std::make_unique<AddLayerGroupRequest>(group));
+        stackGroups.push_back({.layerIndex = pendingDrapeStacks[k],
+                               .group = std::move(group),
+                               .tweaker = std::make_unique<TerrainLayerTweaker>(this)});
+    }
+    return true;
+}
+
+void RenderTerrain::clearStackGroupDrawables() {
+    for (auto& stackGroup : stackGroups) {
+        if (stackGroup.group) {
+            stackGroup.group->clearDrawables();
+        }
+    }
+}
+
 void RenderTerrain::deactivate(UniqueChangeRequestVec& changes) {
     // depthLayerGroup / depthRenderTarget are owned by this RenderTerrain and
-    // released with it; only the mesh layerGroup is registered separately with
-    // the orchestrator, so that is all we need to unregister here.
+    // released with it; only the mesh layerGroup and the drape stacks' groups are
+    // registered separately with the orchestrator, so that is all we need to unregister here.
     activateLayerGroup(false, changes);
+    for (auto& stackGroup : stackGroups) {
+        if (stackGroup.group) {
+            changes.emplace_back(std::make_unique<RemoveLayerGroupRequest>(stackGroup.group));
+        }
+    }
+    stackGroups.clear();
 }
 
 #if MLN_RENDER_BACKEND_OPENGL
@@ -1710,6 +1824,9 @@ void RenderTerrain::packDEMArrayLayer(gfx::Context& context, const UnwrappedTile
         demArrayLayer[id] = layer;
     }
     demTextureArray->uploadLayer(layer, imagePtr->data.get());
+    // what the depth pass reads changed (a layer recycled for another tile, a border refreshed): drawn
+    // again even with the camera still
+    depthDirty = true;
 }
 
 void RenderTerrain::freeDEMArrayLayer(const UnwrappedTileID& id) {

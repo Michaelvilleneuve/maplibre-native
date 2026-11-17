@@ -36,7 +36,8 @@ public:
                                 const std::set<UnwrappedTileID>& cover,
                                 const std::set<UnwrappedTileID>& fullSizeTiles,
                                 const Color& backgroundColor,
-                                size_t maxResizes);
+                                size_t maxResizes,
+                                uint8_t stacks = 1);
 
     /// How many frames (calls of createRenderTargets) a memory failure holds back new full-size
     /// targets for. It is also the window in which further failures go unreported.
@@ -58,11 +59,15 @@ public:
     /// Remove render targets for tiles that are no longer part of the given set
     void removeStaleRenderTargets(const std::set<UnwrappedTileID>& currentTiles);
 
+    /// Every drape target, each tile's stack-0 target followed by its targets of the stacks above
     template <typename Func /* void(std::shared_ptr<RenderTarget>&) */>
     void visitRenderTargets(Func f) {
         for (auto& pair : renderTargets) {
             if (pair.second) {
                 f(pair.second);
+                for (auto& upper : pair.second->getStackTargets()) {
+                    f(upper);
+                }
             }
         }
     }
@@ -72,9 +77,15 @@ public:
         for (const auto& pair : renderTargets) {
             if (pair.second) {
                 f(pair.second);
+                for (const auto& upper : pair.second->getStackTargets()) {
+                    f(upper);
+                }
             }
         }
     }
+
+    /// A tile's target of a drape stack (0: the one getRenderTarget gives), null without one
+    std::shared_ptr<RenderTarget> getStackRenderTarget(const UnwrappedTileID& id, uint8_t stack) const;
 
 private:
     uint32_t fullSize;

@@ -148,7 +148,8 @@ RenderTarget::DrapeCoverage RenderTarget::computeDrapeCoverage(RenderOrchestrato
     // entirely (measured: all visible drape targets re-rendered every frame while
     // panning). coverage.propertiesEpoch is left at its default and no longer consulted.
     orchestrator.visitLayerGroups([&](LayerGroupBase& layerGroup) {
-        if (layerGroup.getType() != LayerGroupBase::Type::TileLayerGroup || !layerGroup.shouldRenderToTerrain()) {
+        if (layerGroup.getType() != LayerGroupBase::Type::TileLayerGroup || !layerGroup.shouldRenderToTerrain() ||
+            layerGroup.getDrapeStack() != drapeStack) {
             return;
         }
         coverage.totalGroups++;
@@ -194,7 +195,8 @@ void RenderTarget::renderDrapedLayerGroups(RenderOrchestrator& orchestrator, Pai
     // for unloaded children renders into each child target it covers.
     const auto visitDrapedGroups = [&](auto&& visit, auto&& f) {
         visit([&](LayerGroupBase& layerGroup) {
-            if (layerGroup.getType() == LayerGroupBase::Type::TileLayerGroup && layerGroup.shouldRenderToTerrain()) {
+            if (layerGroup.getType() == LayerGroupBase::Type::TileLayerGroup && layerGroup.shouldRenderToTerrain() &&
+                layerGroup.getDrapeStack() == drapeStack) {
                 f(layerGroup);
             }
         });

@@ -107,6 +107,39 @@ void Renderer::Impl::setObserver(RendererObserver* observer_) {
     observer = observer_ ? observer_ : &nullObserver();
 }
 
+namespace {
+// maplibre-gl-js render_to_texture's stacks: the draped layer groups under every stack break (a
+// custom layer, drawn on screen after the terrain) bake into the drape stack 0, those over one into
+// another stack, the terrain drawn again with it at its place in the style (RenderTerrain's stack
+// groups), so a custom layer is drawn between the draped layers under it and those over it, as
+// without terrain. Sets each draped group's stack and gives each stack above the first the lowest
+// layer index of its groups. Stacks without draped groups are left out.
+std::vector<int32_t> assignDrapeStacks(RenderOrchestrator& orchestrator) {
+    std::vector<int32_t> upperStackIndices;
+    int breaks = 0;
+    int lastBreakWithStack = 0;
+    orchestrator.visitLayerGroups([&](LayerGroupBase& layerGroup) {
+        if (layerGroup.breaksDrapeStack()) {
+            ++breaks;
+            return;
+        }
+        if (layerGroup.getType() != LayerGroupBase::Type::TileLayerGroup || !layerGroup.shouldRenderToTerrain()) {
+            return;
+        }
+        if (breaks == 0) {
+            layerGroup.setDrapeStack(0);
+            return;
+        }
+        if (breaks != lastBreakWithStack && upperStackIndices.size() < 254) {
+            lastBreakWithStack = breaks;
+            upperStackIndices.push_back(layerGroup.getLayerIndex());
+        }
+        layerGroup.setDrapeStack(static_cast<uint8_t>(upperStackIndices.size()));
+    });
+    return upperStackIndices;
+}
+} // namespace
+
 void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<UpdateParameters>& updateParameters) {
     MLN_TRACE_FUNC();
     auto& context = backend.getContext();
@@ -293,8 +326,15 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
                                                         texturePool.tilesAtFullSize());
         // A tile that changes size gets a new target, which bakes at once whatever the drape budget
         // below says, so the cap limits how many change in a frame and the drape pass has the rest.
-        auto resizes = texturePool.createRenderTargets(
-            context, demTileIDs, sizes.fullSizeTiles, renderTreeParameters.backgroundColor, sizes.maxResizes);
+        // The drape stacks of the layer groups as they are (those this frame adds get theirs below)
+        const auto upperStackIndices = assignDrapeStacks(orchestrator);
+        terrain->setDrapeStacks(upperStackIndices);
+        auto resizes = texturePool.createRenderTargets(context,
+                                                       demTileIDs,
+                                                       sizes.fullSizeTiles,
+                                                       renderTreeParameters.backgroundColor,
+                                                       sizes.maxResizes,
+                                                       static_cast<uint8_t>(upperStackIndices.size() + 1));
         if (renderTreeParameters.mapMode == MapMode::Continuous) {
             replacedDrapeTiles = std::move(resizes.replaced);
         }
@@ -346,6 +386,11 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
 
     orchestrator.processChanges();
     orchestrator.addRenderTargets(texturePool);
+    // The layer groups added this frame in their drape stack (a stack count changed by them is taken
+    // up by the pool and the terrain next frame)
+    if (orchestrator.getRenderTerrain()) {
+        assignDrapeStacks(orchestrator);
+    }
 
     // Create the terrain occlusion depth target before the upload phase, so the
     // symbol tweaker binds the real depth texture for THIS frame instead of the
@@ -500,6 +545,10 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
                 if (const auto& layerGroup = terrain->getLayerGroup()) {
                     terrainTweaker->execute(*layerGroup, parameters);
                 }
+                // the terrain drawn again for each drape stack above the first, each its own tweaker
+                terrain->visitStackGroups([&](LayerGroupBase& stackGroup, TerrainLayerTweaker& stackTweaker) {
+                    stackTweaker.execute(stackGroup, parameters);
+                });
                 if (const auto& depthLayerGroup = terrain->getDepthLayerGroup()) {
                     terrainTweaker->execute(*depthLayerGroup, parameters);
                 }
