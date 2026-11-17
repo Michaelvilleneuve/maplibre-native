@@ -972,7 +972,11 @@ void RenderTerrain::update(RenderOrchestrator& orchestrator,
             }
         }
         depthInstances = std::move(instances);
-        if (sig != depthInstanceSignature) {
+        // Also when the depth group was emptied with the tile set unchanged (the drape stacks
+        // made again as a draped layer is shown or hidden, the skirts' setting): the signature
+        // alone kept the depth group empty, the depth texture gone for good
+        const bool depthGroupEmptied = depthLayerGroup && depthLayerGroup->empty() && !depthInstances.empty();
+        if (sig != depthInstanceSignature || depthGroupEmptied) {
             depthInstanceSignature = sig;
             rebuildInstancedDepthDrawable(context, shaders);
             depthDirty = true;
